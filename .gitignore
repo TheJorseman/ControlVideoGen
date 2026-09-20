@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ControlVideoGen
+models/
+outputs/
+settings.json
+mitm_mcp_traffic.db

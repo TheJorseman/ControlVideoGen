@@ -1,0 +1,18 @@
+# Nota: instala primero PyTorch con soporte CUDA segun tu GPU (ver README).
+gradio>=5.40
+diffusers @ git+https://github.com/huggingface/diffusers
+transformers>=4.56
+accelerate>=1.6
+huggingface_hub>=0.34
+safetensors
+sentencepiece
+protobuf
+imageio-ffmpeg
+einops
+pillow
+numpy
+mediapipe
+rembg>=2.0.60
+onnxruntime
+opencv-python
+ftfy
