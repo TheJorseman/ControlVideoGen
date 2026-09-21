@@ -44,7 +44,7 @@ REGISTRY: dict[str, ModelSpec] = {
         label="Wan 2.2 T2V-A14B (maxima calidad)",
         repo_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         tasks="T2V",
-        approx_gb=33.0,
+        approx_gb=60.0,
         min_vram_gb=12,
         note="MoE 27B. Requiere offload intenso en 16GB; usar solo si buscas calidad maxima.",
         phase=2,
@@ -54,7 +54,7 @@ REGISTRY: dict[str, ModelSpec] = {
         label="Wan 2.2 I2V-A14B (imagen a video 14B)",
         repo_id="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
         tasks="I2V",
-        approx_gb=33.0,
+        approx_gb=60.0,
         min_vram_gb=12,
         phase=2,
     ),
@@ -63,7 +63,7 @@ REGISTRY: dict[str, ModelSpec] = {
         label="Wan 2.2 Animate-14B (reemplazo/animacion de persona)",
         repo_id="Wan-AI/Wan2.2-Animate-14B-Diffusers",
         tasks="V2V pose+face, reemplazo de persona (mode replace)",
-        approx_gb=33.0,
+        approx_gb=68.0,
         min_vram_gb=16,
         note="Fase 2: nucleo del flujo Video-a-Video para cambiar personas conservando el fondo.",
         phase=2,
@@ -73,7 +73,7 @@ REGISTRY: dict[str, ModelSpec] = {
         label="Wan 2.2 Animate-2-14B (motion transfer end-to-end)",
         repo_id="Wan-AI/Wan2.2-Animate-2-14B-Diffusers",
         tasks="V2V animacion de personaje sin extractores intermedios",
-        approx_gb=33.0,
+        approx_gb=68.0,
         min_vram_gb=16,
         note="Fase 2 (experimental): version 2, consume el video de driving directamente.",
         phase=2,
@@ -83,7 +83,7 @@ REGISTRY: dict[str, ModelSpec] = {
         label="Wan VACE-14B (control pose/depth/canny)",
         repo_id="Wan-AI/Wan2.1-VACE-14B-diffusers",
         tasks="V2V con condicion pose/depth/canny/trajectory",
-        approx_gb=33.0,
+        approx_gb=71.0,
         min_vram_gb=16,
         note="Fase 2: video de control completo + prompt para reencarnacion/restyling.",
         phase=2,
@@ -136,7 +136,8 @@ REGISTRY: dict[str, ModelSpec] = {
 def dir_size_gb(path: Path) -> float:
     if not path.exists():
         return 0.0
-    total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    total = sum(f.stat().st_size for f in path.rglob("*")
+                if f.is_file() and ".cache" not in f.parts)
     return total / 1e9
 
 
@@ -318,8 +319,13 @@ def get_progress() -> dict:
         err = DOWNLOAD["error"]
         scan_dir = DOWNLOAD.get("scan_dir") or ""
     # El conteo de bytes de XET/hub es poco fiable en agregacion: usamos lo que
-    # realmente hay en disco como numerador, y el total anunciado por hub.
-    disk_bytes = int(dir_size_gb(Path(scan_dir)) * 1e9) if scan_dir else 0
+    # realmente hay en disco como numerador (sin staging .cache/.incomplete),
+    # y el total anunciado por hub.
+    disk_bytes = 0
+    if scan_dir and Path(scan_dir).exists():
+        disk_bytes = sum(f.stat().st_size for f in Path(scan_dir).rglob("*")
+                         if f.is_file() and ".cache" not in f.parts
+                         and not f.name.endswith((".incomplete", ".metadata")))
     done = max(disk_bytes, DOWNLOAD["bytes_done_cum"] + live_done) if scan_dir else DOWNLOAD["bytes_done_cum"] + live_done
     total = DOWNLOAD["bytes_total_cum"] + live_total
     if total == 0 and key and REGISTRY[key].approx_gb:
