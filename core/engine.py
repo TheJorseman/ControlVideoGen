@@ -343,7 +343,7 @@ _V2V_MODES = {
     "vace_pose": ("wan_vace", "VACE: video de esqueleto pose + prompt"),
     "vace_depth": ("wan_vace", "VACE: video de profundidad + prompt"),
     "minimax_r2va": ("minimax_api", "MiniMax H3 (nube, sin GPU): video de motion + foto de la persona"),
-    "minimax_i2v": ("minimax_i2v", "MiniMax Hailuo-2.3 (nube, TOKEN PLAN): imagen como primer frame + prompt de motion"),
+    "minimax_i2v": ("minimax_i2v", "MiniMax Hailuo-2.3 (nube, TOKEN PLAN): imagen como primer frame + prompt de motion + audio del original"),
 }
 
 
@@ -357,11 +357,13 @@ def _v2v_loader(model_key: str):
     return anim_be.load_animate if model_key == anim_be.MODEL_KEY else vace_be.load_vace
 
 
-def _v2v_hailuo(settings: dict, prompt: str, character_image_path: str | None,
-                duration_s: int = 10) -> tuple[str, str]:
+def _v2v_hailuo(settings: dict, video_path: str, prompt: str,
+                character_image_path: str | None, duration_s: int = 10) -> tuple[str, str]:
     """Hailuo-2.3 (Token Plan): la imagen de referencia es el PRIMER FRAME y el
-    prompt describe el motion beat-by-beat. Max 10 s @768P, sin audio nativo."""
+    prompt describe el motion beat-by-beat. Max 10 s @768P. H2.3 es mudo: se le
+    muxea el audio del video original recortado a la duracion generada."""
     from .backends import minimax_api
+    from . import preprocess
 
     if not character_image_path:
         raise RuntimeError("Sube la imagen (sera el primer frame del video).")
@@ -387,7 +389,13 @@ def _v2v_hailuo(settings: dict, prompt: str, character_image_path: str | None,
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = OUTPUT_DIR / f"v2v_hailuo_{stamp}.mp4"
     minimax_api.download_to(url, str(out))
-    PROGRESS.update({"stage": "Listo (nube, sin audio)", "done": True})
+    PROGRESS["stage"] = "Muxeando audio del video original..."
+    try:
+        preprocess._mux_audio(str(out), video_path)
+        audio_note = ", audio original muxeado"
+    except Exception:  # noqa: BLE001
+        audio_note = " (sin audio: no se pudo muxear)"
+    PROGRESS.update({"stage": f"Listo (nube{audio_note})", "done": True})
     return str(out), ""
 
 
@@ -611,7 +619,8 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
         return _v2v_minimax(settings, video_path, prompt, max_frames,
                             character_image_path, start_reference)
     if model_key == "minimax_i2v":
-        return _v2v_hailuo(settings, prompt, character_image_path, duration_s)
+        return _v2v_hailuo(settings, video_path, prompt, character_image_path,
+                           duration_s)
 
     conds = prepare_conditions(settings, video_path, mode, resolution, max_frames)
     n = len(conds["frames"])
