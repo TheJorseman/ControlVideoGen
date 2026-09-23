@@ -15,4 +15,5 @@ mediapipe
 rembg>=2.0.60
 onnxruntime
 opencv-python
+torchao
 ftfy

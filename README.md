@@ -14,9 +14,10 @@ un solo entorno de Python para Texto-a-Video, Imagen-a-Video y Video-a-Video
 | LTX-2.5 22B distilled | T2V / I2V con audio nativo | 16 GB (offload, fp8) | requiere aceptar licencia en HF + token |
 | MiniMax H3 (API oficial) | T2V / I2V / referencias 768P–2K | n/a (nube) | requiere API key pay-as-you-go |
 
-> **Nota MiniMax H3 local**: los checkpoints abiertos de H3 requieren ~75 GB de RAM
-> del sistema con INT8 + offload (picos de 16–18 GB de VRAM). Con 32 GB de RAM no es
-> viable localmente; se integra via su API oficial (`/v2/video_generation`).
+> **Nota MiniMax**: verificado con plan de tokens (sk-cp, Plus): **chat M3 y `image-01`
+> SÍ funcionan** (se usan como agente de prompts y motor de swap). El **video H3 NO**
+> está cubierto por el token plan (error 2013); requiere Creditos pay-as-you-go de la
+> plataforma. Y H3 local necesita ~75 GB de RAM del sistema, no viable en 32 GB.
 
 ## Instalacion (un solo environment)
 

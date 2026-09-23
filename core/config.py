@@ -19,6 +19,7 @@ DEFAULTS: dict = {
     "model_dir": DEFAULT_MODEL_DIR,
     "vram_profile": "auto",
     "hf_token": "",
+    "minimax_host": "https://api.minimax.io",
     "api_keys": {
         "deepseek": "",
         "openai": "",

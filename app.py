@@ -4,6 +4,7 @@ Uso:  python app.py   (abre http://127.0.0.1:7860)
 """
 from __future__ import annotations
 
+import logging
 import random
 
 import gradio as gr
@@ -11,6 +12,19 @@ import gradio as gr
 from core import config, engine, model_manager
 from core import character_swap
 from core.model_manager import REGISTRY
+
+
+class _ResetNoiseFilter(logging.Filter):
+    """Silencia el ConnectionResetError del proactor de Windows al cerrar el
+    navegador conexiones SSE de la cola de Gradio (inofensivo)."""
+
+    def filter(self, record):
+        exc = record.exc_info[1] if isinstance(record.exc_info, tuple) and len(record.exc_info) == 3 else None
+        noisy = "_call_connection_lost" in str(record.getMessage())
+        return not (noisy and isinstance(exc, ConnectionError))
+
+
+logging.getLogger("asyncio").addFilter(_ResetNoiseFilter())
 
 SETTINGS = config.load_settings()
 config.apply_env(SETTINGS["model_dir"])
@@ -118,8 +132,9 @@ def delete_selected(key: str, confirm: bool):
     return fmt_bytes_table(), msg
 
 
-def save_keys(hf_token, deepseek, openai, anthropic, gemini, minimax):
+def save_keys(hf_token, deepseek, openai, anthropic, gemini, minimax, minimax_host):
     SETTINGS["hf_token"] = hf_token
+    SETTINGS["minimax_host"] = (minimax_host or "https://api.minimax.io").strip()
     SETTINGS["api_keys"] = {
         "deepseek": deepseek,
         "openai": openai,
@@ -128,7 +143,8 @@ def save_keys(hf_token, deepseek, openai, anthropic, gemini, minimax):
         "minimax": minimax,
     }
     config.save_settings(SETTINGS)
-    return "Claves guardadas. Nano Banana y MiniMax (H3 por API) ya pueden usarse; el agente de prompts lee la del proveedor elegido."
+    return ("Claves guardadas. MiniMax ahora puede usarse como motor de swap (image-01) "
+            "y como modo V2V en la nube (H3 ref2va). Host: " + SETTINGS["minimax_host"])
 
 
 def poll_progress(stage_md: gr.Textbox | None = None) -> str:
@@ -178,8 +194,9 @@ def do_extract(video_path, mode, resolution, frames):
     try:
         conds = engine.prepare_conditions(SETTINGS, video_path, mode, resolution, int(frames))
         return conds["preview"], (
-            f"Condiciones extraidas: {len(conds['frames'])} frames a {resolution}. "
-            "Puedes generar."
+            f"Condiciones extraidas: {len(conds['frames'])} frames · "
+            f"{conds['width']}x{conds['height']} · "
+            f"{len(conds['frames']) / conds['fps']:.1f}s a {conds['fps']:.0f}fps. Puedes generar."
         )
     except Exception as exc:  # noqa: BLE001
         return None, f"Error: {exc}"
@@ -206,25 +223,38 @@ def do_enhance(prompt: str, provider: str) -> str:
         return prompt
     try:
         return prompt_agent.enhance_prompt(
-            prompt, provider, SETTINGS["api_keys"].get(provider, "")
+            prompt, provider, SETTINGS["api_keys"].get(provider, ""),
+            host=SETTINGS.get("minimax_host", ""),
         )
     except Exception as exc:  # noqa: BLE001
         return prompt
 
 
-def do_nano_swap(video_path, person_image, model_label: str):
+def do_nano_swap(video_path, person_image, engine_label: str, model_label: str,
+                 scene_prompt: str = ""):
     from core import character_swap
 
     if not video_path or not person_image:
         return None, "Sube el video de referencia Y la foto de la persona nueva."
     try:
+        if engine_label == "GPT-Image-1 (OpenAI)":
+            out = character_swap.swap_with_openai(
+                video_path, person_image, SETTINGS["api_keys"].get("openai", "")
+            )
+            return out, f"Referencia generada con GPT-Image-1: {out}"
+        if engine_label == "MiniMax image-01":
+            out = character_swap.swap_with_minimax(
+                video_path, person_image, SETTINGS["api_keys"].get("minimax", ""),
+                scene_prompt=scene_prompt, host=SETTINGS.get("minimax_host", ""),
+            )
+            return out, f"Referencia generada con MiniMax image-01: {out}"
         model = character_swap.NANO_MODELS.get(model_label, "gemini-2.5-flash-image")
         out = character_swap.generate_character_reference(
             video_path, person_image, SETTINGS["api_keys"].get("gemini", ""), model
         )
         return out, f"Referencia generada con {model_label}: {out}"
     except Exception as exc:  # noqa: BLE001
-        return None, f"Error Nano Banana: {exc}"
+        return None, f"Error swap ({engine_label}): {exc}"
 
 
 with gr.Blocks(title="ControlVideoGen") as demo:
@@ -244,7 +274,7 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                         t2v_enhance = gr.Button("✨ Mejorar prompt con agente LLM", size="sm")
                         t2v_provider = gr.Dropdown(
                             [("DeepSeek", "deepseek"), ("OpenAI", "openai"),
-                             ("Anthropic", "anthropic"), ("Gemini", "gemini")],
+                             ("Anthropic", "anthropic"), ("Gemini", "gemini"), ("MiniMax M3 (plan tokens)", "minimax")],
                             value="deepseek", label="Proveedor", scale=2)
                     t2v_negative = gr.Textbox(label="Prompt negativo", lines=1,
                                               value="worst quality, blurry, distorted")
@@ -279,7 +309,7 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                         i2v_enhance = gr.Button("✨ Mejorar prompt con agente LLM", size="sm")
                         i2v_provider = gr.Dropdown(
                             [("DeepSeek", "deepseek"), ("OpenAI", "openai"),
-                             ("Anthropic", "anthropic"), ("Gemini", "gemini")],
+                             ("Anthropic", "anthropic"), ("Gemini", "gemini"), ("MiniMax M3 (plan tokens)", "minimax")],
                             value="deepseek", label="Proveedor", scale=2)
                     i2v_negative = gr.Textbox(label="Prompt negativo", lines=1,
                                               value="worst quality, blurry, distorted")
@@ -311,13 +341,16 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                     v2v_character = gr.Image(type="filepath",
                                              label="Imagen de la persona nueva (Animate / referencia en VACE)",
                                              interactive=True)
-                    with gr.Accordion("⚡ Swap rapido: generar referencia con Nano Banana", open=True):
+                    with gr.Accordion("⚡ Swap rapido: generar referencia con Nano Banana / GPT-Image", open=True):
                         gr.Markdown("Usa un frame del video + una foto de la persona nueva para generar la "
-                                    "imagen de referencia automaticamente (requiere API key de Gemini).")
+                                    "imagen de referencia automaticamente (API key de Gemini o de OpenAI).")
+                        nano_engine = gr.Radio(choices=list(character_swap.SWAP_ENGINES.keys()),
+                                               value="Nano Banana (Gemini)", label="Motor de swap")
                         with gr.Row():
                             nano_person = gr.Image(type="filepath", label="Foto de la persona nueva")
                             nano_model = gr.Dropdown(choices=list(character_swap.NANO_MODELS.keys()),
-                                                     value="Nano Banana (rapido)", label="Modelo")
+                                                     value="Nano Banana (rapido)",
+                                                     label="Modelo Gemini (ignorado con OpenAI)")
                         nano_btn = gr.Button("Generar imagen de referencia")
                         nano_msg = gr.Markdown()
                     v2v_prompt = gr.Textbox(label="Prompt", lines=3,
@@ -326,13 +359,15 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                         v2v_enhance = gr.Button("✨ Mejorar prompt con agente LLM", size="sm")
                         v2v_provider = gr.Dropdown(
                             [("DeepSeek", "deepseek"), ("OpenAI", "openai"),
-                             ("Anthropic", "anthropic"), ("Gemini", "gemini")],
+                             ("Anthropic", "anthropic"), ("Gemini", "gemini"), ("MiniMax M3 (plan tokens)", "minimax")],
                             value="deepseek", label="Proveedor", scale=2)
                     v2v_negative = gr.Textbox(label="Prompt negativo", lines=1,
                                               value="worst quality, blurry, distorted")
                     with gr.Accordion("Avanzado", open=False):
-                        v2v_resolution = gr.Dropdown(choices=engine.resolution_options(SETTINGS),
-                                                     label="Resolucion", value="832x480 (16:9)")
+                        v2v_resolution = gr.Dropdown(
+                            choices=[engine.AUTO_RESOLUTION] + engine.resolution_options(SETTINGS),
+                            label="Resolucion (Auto respeta la orientacion del video, sin deformar)",
+                            value=engine.AUTO_RESOLUTION)
                         v2v_frames = gr.Slider(17, 161, value=81, step=4, label="Max frames (se ajusta a 4N+1)")
                         v2v_steps = gr.Slider(8, 50, value=20, step=1, label="Pasos por segmento")
                         v2v_guidance = gr.Slider(1.0, 10.0, value=1.0, step=0.5, label="Guidance")
@@ -393,6 +428,9 @@ with gr.Blocks(title="ControlVideoGen") as demo:
             with gr.Row():
                 k_gemini = gr.Textbox(label="Gemini (Nano Banana)", type="password", value=SETTINGS["api_keys"]["gemini"])
                 k_minimax = gr.Textbox(label="MiniMax (H3 por API)", type="password", value=SETTINGS["api_keys"]["minimax"])
+                k_minimax_host = gr.Textbox(label="MiniMax host",
+                                            value=SETTINGS.get("minimax_host", "https://api.minimax.io"),
+                                            info="Usa https://api.minimaxi.com si tu cuenta es de la version china")
                 keys_save = gr.Button("Guardar keys")
             keys_msg = gr.Markdown()
 
@@ -411,7 +449,8 @@ with gr.Blocks(title="ControlVideoGen") as demo:
     t2v_enhance.click(fn=do_enhance, inputs=[t2v_prompt, t2v_provider], outputs=t2v_prompt)
     i2v_enhance.click(fn=do_enhance, inputs=[i2v_prompt, i2v_provider], outputs=i2v_prompt)
     v2v_enhance.click(fn=do_enhance, inputs=[v2v_prompt, v2v_provider], outputs=v2v_prompt)
-    nano_btn.click(fn=do_nano_swap, inputs=[v2v_video, nano_person, nano_model],
+    nano_btn.click(fn=do_nano_swap,
+                   inputs=[v2v_video, nano_person, nano_engine, nano_model, v2v_prompt],
                    outputs=[v2v_character, nano_msg])
     v2v_extract_btn.click(fn=do_extract,
                           inputs=[v2v_video, v2v_mode, v2v_resolution, v2v_frames],
@@ -428,7 +467,8 @@ with gr.Blocks(title="ControlVideoGen") as demo:
     dl_timer.tick(fn=poll_download, outputs=[dl_bar, table, dl_btn])
     del_btn.click(fn=delete_selected, inputs=[sel_model, confirm_del], outputs=[table, model_msg])
     keys_save.click(fn=save_keys,
-                    inputs=[hf_token_box, k_deepseek, k_openai, k_anthropic, k_gemini, k_minimax],
+                    inputs=[hf_token_box, k_deepseek, k_openai, k_anthropic, k_gemini,
+                            k_minimax, k_minimax_host],
                     outputs=keys_msg)
 
 

@@ -14,6 +14,25 @@ _CACHE: dict = {}
 
 
 # ------------------------------------------------------------------ video IO
+def _crop_resize(frame, size):
+    """Center-crop al aspect ratio de size y luego redimensiona (sin deformar)."""
+    import cv2
+
+    th, tw = size[1], size[0]
+    h, w = frame.shape[:2]
+    target_ar = tw / th
+    src_ar = w / h
+    if src_ar > target_ar:  # mas ancho de lo necesario: recorta lados
+        nw = max(int(round(h * target_ar)), 1)
+        x = (w - nw) // 2
+        frame = frame[:, x:x + nw]
+    elif src_ar < target_ar:  # mas alto: recorta arriba/abajo
+        nh = max(int(round(w / target_ar)), 1)
+        y = (h - nh) // 2
+        frame = frame[y:y + nh, :]
+    return cv2.resize(frame, size)
+
+
 def load_video(path: str, max_frames: int | None = None, size: tuple | None = None):
     """Devuelve (frames np uint8 [N,H,W,3], fps) usando OpenCV para leer."""
     import cv2
@@ -33,8 +52,23 @@ def load_video(path: str, max_frames: int | None = None, size: tuple | None = No
         raise RuntimeError(f"No se pudo leer el video: {path}")
     out = np.stack(frames)
     if size:
-        out = np.stack([cv2.resize(f, size) for f in out])
+        out = np.stack([_crop_resize(f, size) for f in out])
     return out, float(fps)
+
+
+def probe_video(path: str):
+    """(w, h, fps) del video sin decodificar todos los frames."""
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    if w == 0 or h == 0:
+        raise RuntimeError(f"No se pudo leer el video: {path}")
+    return w, h, float(fps), n
 
 
 def save_video(frames, path: str, fps: float = 24.0, audio_from: str | None = None):

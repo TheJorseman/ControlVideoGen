@@ -15,6 +15,11 @@ PROVIDERS = {
         "url": "https://api.deepseek.com/chat/completions",
         "model": "deepseek-chat",
     },
+    "minimax": {
+        "label": "MiniMax (plan de tokens)",
+        "url": "https://api.minimax.io/anthropic/v1/messages",
+        "model": "MiniMax-M3",
+    },
     "openai": {
         "label": "OpenAI",
         "url": "https://api.openai.com/v1/chat/completions",
@@ -33,7 +38,8 @@ PROVIDERS = {
 }
 
 
-def enhance_prompt(prompt: str, provider: str, api_key: str, model: str = "") -> str:
+def enhance_prompt(prompt: str, provider: str, api_key: str, model: str = "",
+                   host: str = "") -> str:
     if provider not in PROVIDERS:
         raise RuntimeError(f"Proveedor desconocido: {provider}")
     if not api_key:
@@ -41,6 +47,28 @@ def enhance_prompt(prompt: str, provider: str, api_key: str, model: str = "") ->
     cfg = PROVIDERS[provider]
     model = model or cfg["model"]
     import httpx
+
+    if provider == "minimax":
+        # Plan de tokens sk-cp: endpoint compatible-Anthropic; fallback OpenAI-compat
+        base = (host or "https://api.minimax.io").rstrip("/")
+        msgs = {"model": model, "max_tokens": 400, "system": SYSTEM,
+                "messages": [{"role": "user", "content": prompt}]}
+        resp = httpx.post(f"{base}/anthropic/v1/messages",
+                          headers={"authorization": f"Bearer {api_key}",
+                                   "anthropic-version": "2023-06-01",
+                                   "content-type": "application/json"},
+                          json=msgs, timeout=90)
+        if resp.status_code in (401, 403, 404):
+            resp = httpx.post(f"{base}/v1/chat/completions",
+                              headers={"authorization": f"Bearer {api_key}"},
+                              json={"model": model, "max_tokens": 400,
+                                    "messages": [{"role": "system", "content": SYSTEM},
+                                                 {"role": "user", "content": prompt}]},
+                              timeout=90)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        resp.raise_for_status()
+        return resp.json()["content"][0]["text"].strip()
 
     if provider == "anthropic":
         resp = httpx.post(
@@ -54,15 +82,15 @@ def enhance_prompt(prompt: str, provider: str, api_key: str, model: str = "") ->
         resp.raise_for_status()
         return resp.json()["content"][0]["text"].strip()
     if provider == "gemini":
-        resp = httpx.post(
-            cfg["url"].format(model=model),
-            params={"key": api_key},
-            json={"systemInstruction": {"parts": [{"text": SYSTEM}]},
-                  "contents": [{"parts": [{"text": prompt}]}]},
-            timeout=90,
+        from .character_swap import gemini_request
+
+        r = gemini_request(
+            model,
+            api_key,
+            {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+             "contents": [{"parts": [{"text": prompt}]}]},
         )
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     # deepseek y openai son OpenAI-compatible
     resp = httpx.post(
         cfg["url"],

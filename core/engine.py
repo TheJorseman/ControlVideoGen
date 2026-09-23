@@ -71,6 +71,19 @@ def max_frames(settings: dict) -> int:
     return resolve_profile(settings)["max_frames"]
 
 
+AUTO_RESOLUTION = "Auto (respeta orientacion del video)"
+
+
+def _auto_size(src_w: int, src_h: int, settings: dict, heavy: bool = False) -> str:
+    """Elige resolucion del catalogo segun la orientacion del video de origen.
+    heavy=True (modelos 14B): se limita al tier 480p para caber en 16 GB."""
+    prof = resolve_profile(settings)
+    portrait = src_h > src_w
+    if prof["max_resolution"] == "720p" and not heavy:
+        return "720x1280 (auto 9:16)" if portrait else "1280x720 (auto 16:9)"
+    return "480x832 (auto 9:16)" if portrait else "832x480 (auto 16:9)"
+
+
 def _parse_size(text: str) -> tuple[int, int]:
     wh = text.split()[0]
     w, h = wh.split("x")
@@ -90,7 +103,13 @@ def _ensure_pipe(settings: dict, model_key: str, loader, cache_key: str | None =
         )
     prof = resolve_profile(settings)
     resident = prof["resident"] and spec.approx_gb < 15
-    _CACHE["pipe"] = loader(local_dir, resident=resident)
+    kwargs = {"resident": resident}
+    import inspect
+
+    if "quantize" in inspect.signature(loader).parameters:
+        # Modelos grandes (>15 GB): INT8 + streaming por bloques en GPUs de consumo
+        kwargs["quantize"] = spec.approx_gb > 15 and prof["vram_gb"] < 32
+    _CACHE["pipe"] = loader(local_dir, **kwargs)
     _CACHE["cache_key"] = cache_key
     _CACHE["model_key"] = model_key
     return _CACHE["pipe"]
@@ -187,6 +206,7 @@ def generate(
             resolution="768P",
             ratio=_ratio_from_size(width, height),
             poll_cb=poll_cb,
+            host=settings.get("minimax_host", ""),
         )
         minimax_api.download_to(url, str(out))
         PROGRESS.update({"stage": "Listo", "done": True})
@@ -284,6 +304,7 @@ _V2V_MODES = {
     "animate": ("wan_animate", "Wan Animate: animar personaje con la pose del video"),
     "vace_pose": ("wan_vace", "VACE: video de esqueleto pose + prompt"),
     "vace_depth": ("wan_vace", "VACE: video de profundidad + prompt"),
+    "minimax_r2va": ("minimax_api", "MiniMax H3 (nube, sin GPU): video de motion + foto de la persona"),
 }
 
 
@@ -297,6 +318,37 @@ def _v2v_loader(model_key: str):
     return anim_be.load_animate if model_key == anim_be.MODEL_KEY else vace_be.load_vace
 
 
+def _v2v_minimax(settings: dict, video_path: str, prompt: str, max_frames: int,
+                 character_image_path: str | None) -> tuple[str, str]:
+    """Swap en la nube con H3 ref2va: motion del video + identidad de la foto."""
+    from .backends import minimax_api
+
+    if not character_image_path:
+        raise RuntimeError("Sube la imagen de la persona nueva (o genererala arriba).")
+    if not prompt.strip():
+        raise RuntimeError("Escribe un prompt describiendo la escena/accion del video final.")
+    api_key = settings["api_keys"].get("minimax", "")
+    host = settings.get("minimax_host", "")
+    duration = max(4, min(15, round(int(max_frames) / 24)))
+
+    PROGRESS.update({"stage": f"MiniMax (nube): subiendo referencia ({duration}s)...",
+                     "step": 0, "total_steps": 0, "done": False})
+
+    def _poll(_):
+        PROGRESS["stage"] = "MiniMax (nube): generando en el servidor..."
+
+    url = minimax_api.ref2va_generate(
+        api_key=api_key, prompt=prompt,
+        person_image_paths=[character_image_path], video_path=video_path,
+        duration=duration, poll_cb=_poll, host=host,
+    )
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = OUTPUT_DIR / f"v2v_minimax_{stamp}.mp4"
+    minimax_api.download_to(url, str(out))
+    PROGRESS.update({"stage": "Listo (nube)", "done": True})
+    return str(out), ""
+
+
 def _snapped_frames(n: int) -> int:
     n = max(17, min(int(n), 257))
     return (n - 1) // 4 * 4 + 1
@@ -307,6 +359,10 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
     """Extrae las condiciones del video y guarda un preview. Devuelve dict con todo."""
     from . import preprocess
 
+    if resolution == AUTO_RESOLUTION:
+        kind = _V2V_MODES[mode][0]
+        sw, sh, _fps, _n = preprocess.probe_video(video_path)
+        resolution = _auto_size(sw, sh, settings, heavy=kind in ("wan_animate", "wan_vace"))
     height, width = _parse_size(resolution)
     n = _snapped_frames(min(max_frames, resolve_profile(settings)["max_frames"]))
     frames, fps = preprocess.load_video(video_path, max_frames=n, size=(width, height))
@@ -314,10 +370,12 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
         raise RuntimeError("El video es demasiado corto (minimo 17 frames).")
     frames = frames[: _snapped_frames(len(frames))]
 
-    conds = {"frames": frames, "fps": fps, "height": height, "width": width}
+    conds = {"frames": frames, "fps": fps, "height": height, "width": width,
+             "resolution": resolution}
     pil = preprocess.frames_to_pil(frames)
     conds["pil"] = pil
 
+    stamp = datetime.now().strftime("%H%M%S")
     kind = _V2V_MODES[mode][0]
     if mode in ("animate_replace", "animate"):
         conds["pose"] = preprocess.extract_pose(frames, settings["model_dir"])
@@ -327,14 +385,16 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
             frames, settings["model_dir"], mask_frames=conds.get("mask")
         )
         preview = preprocess.save_video(
-            preprocess.pil_to_frames(conds["pose"]), str(OUTPUT_DIR / "preview_pose.mp4"), fps
+            preprocess.pil_to_frames(conds["pose"]),
+            str(OUTPUT_DIR / f"preview_pose_{stamp}.mp4"), fps
         )
     else:
         cond = (preprocess.extract_pose(frames, settings["model_dir"])
                 if mode == "vace_pose" else preprocess.extract_depth(frames))
         conds["control"] = cond
         preview = preprocess.save_video(
-            preprocess.pil_to_frames(cond), str(OUTPUT_DIR / "preview_cond.mp4"), fps
+            preprocess.pil_to_frames(cond),
+            str(OUTPUT_DIR / f"preview_cond_{stamp}.mp4"), fps
         )
     conds["preview"] = preview
     return conds
@@ -351,6 +411,10 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
     if mode not in _V2V_MODES:
         raise RuntimeError(f"Modo desconocido: {mode}")
     model_key = _V2V_MODES[mode][0]
+
+    if model_key == "minimax_api":
+        return _v2v_minimax(settings, video_path, prompt, max_frames,
+                            character_image_path)
 
     PROGRESS.update({"stage": "Extrayendo condiciones (pose/depth/mask)...",
                      "step": 0, "total_steps": 0, "done": False})

@@ -4,8 +4,24 @@ from __future__ import annotations
 MODEL_KEY = "wan_vace"
 
 
-def load_vace(local_dir: str, resident: bool):
+def load_vace(local_dir: str, resident: bool, quantize: bool = False):
     import torch
+
+    if quantize:
+        from diffusers import WanVACEPipeline
+        from diffusers.models import WanVACETransformer3DModel
+
+        from .. import lowvram
+
+        transformer = lowvram.quantized_transformer(
+            WanVACETransformer3DModel, local_dir,
+            cache_dir=lowvram.int8_cache_dir(local_dir),
+        )
+        pipe = WanVACEPipeline.from_pretrained(
+            local_dir, transformer=transformer, torch_dtype=torch.bfloat16
+        )
+        return lowvram.setup_14b(pipe)
+
     from diffusers import WanVACEPipeline
 
     pipe = WanVACEPipeline.from_pretrained(local_dir, torch_dtype=torch.bfloat16)

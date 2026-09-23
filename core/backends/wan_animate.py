@@ -4,8 +4,24 @@ from __future__ import annotations
 MODEL_KEY = "wan_animate"
 
 
-def load_animate(local_dir: str, resident: bool):
+def load_animate(local_dir: str, resident: bool, quantize: bool = False):
     import torch
+
+    if quantize:
+        from diffusers import WanAnimatePipeline
+        from diffusers.models import WanAnimateTransformer3DModel
+
+        from .. import lowvram
+
+        transformer = lowvram.quantized_transformer(
+            WanAnimateTransformer3DModel, local_dir,
+            cache_dir=lowvram.int8_cache_dir(local_dir),
+        )
+        pipe = WanAnimatePipeline.from_pretrained(
+            local_dir, transformer=transformer, torch_dtype=torch.bfloat16
+        )
+        return lowvram.setup_14b(pipe)
+
     from diffusers import WanAnimatePipeline
 
     pipe = WanAnimatePipeline.from_pretrained(local_dir, torch_dtype=torch.bfloat16)
