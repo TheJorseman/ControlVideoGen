@@ -596,6 +596,7 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
             steps=int(steps),
             guidance=float(guidance) if mode == "animate" else 1.0,
             seed=int(seed),
+            prev_segment_conditioning_frames=5 if start_reference else 1,
             step_callback=_step_callback,
         )
     else:

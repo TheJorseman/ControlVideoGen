@@ -49,6 +49,7 @@ def run_animate(
     steps: int = 20,
     guidance: float = 1.0,
     seed: int = 0,
+    prev_segment_conditioning_frames: int = 1,
     step_callback=None,
 ):
     import torch
@@ -65,6 +66,7 @@ def run_animate(
         num_inference_steps=steps,
         guidance_scale=guidance,
         mode=mode,
+        prev_segment_conditioning_frames=prev_segment_conditioning_frames,
         generator=torch.Generator(device="cpu").manual_seed(seed),
         output_type="np",
     )

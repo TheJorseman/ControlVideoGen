@@ -385,7 +385,8 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                             label="Resolucion (Auto respeta la orientacion del video, sin deformar)",
                             value=engine.AUTO_RESOLUTION)
                         v2v_frames = gr.Slider(17, 161, value=81, step=4, label="Max frames (se ajusta a 4N+1)")
-                        v2v_steps = gr.Slider(8, 50, value=20, step=1, label="Pasos por segmento")
+                        v2v_steps = gr.Slider(8, 50, value=24, step=1,
+                                              label="Pasos por segmento (24+ mejora la identidad)")
                         v2v_guidance = gr.Slider(1.0, 10.0, value=1.0, step=0.5, label="Guidance")
                         v2v_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = aleatorio)")
                         v2v_start_ref = gr.Checkbox(
