@@ -213,15 +213,25 @@ def do_extract(video_path, mode, resolution, frames):
         return None, f"Error: {exc}"
 
 
+def do_describe_motion(video_path):
+    if not video_path:
+        return None, "Sube primero el video de referencia."
+    try:
+        text = engine.describe_motion(SETTINGS, video_path)
+        return text, f"Auto-prompt generado por M3 ({len(text.split())} palabras)."
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Error M3: {exc}"
+
+
 def do_v2v(video_path, mode, character, prompt, negative, resolution, frames,
-           steps, guidance, seed, start_ref):
+           steps, guidance, seed, start_ref, duration):
     if not video_path:
         return None, None, "Sube un video primero."
     try:
         out, preview = engine.generate_v2v(
             SETTINGS, mode, video_path, prompt, negative, resolution, int(frames),
             int(steps), float(guidance), resolve_seed(seed), character,
-            start_reference=bool(start_ref),
+            start_reference=bool(start_ref), duration_s=int(duration),
         )
         return preview, out, f"Video generado: {out}"
     except Exception as exc:  # noqa: BLE001
@@ -354,6 +364,8 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                     v2v_video = gr.Video(label="Video de referencia", sources="upload")
                     v2v_mode = gr.Dropdown(choices=engine.v2v_modes(), value="animate_replace",
                                            label="Modo de control")
+                    v2v_duration = gr.Radio(choices=[("6 s", 6), ("10 s", 10)], value=10,
+                                            label="Duracion para modos nube (Hailuo-2.3; H3 usa Max frames/24)")
                     v2v_character = gr.Image(type="filepath",
                                              label="Imagen de la persona nueva (Animate / referencia en VACE)",
                                              interactive=True)
@@ -373,9 +385,11 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                                             placeholder="A woman in a red dress dancing... / describe the new look")
                     with gr.Row():
                         v2v_enhance = gr.Button("✨ Mejorar prompt con agente LLM", size="sm")
+                        v2v_m3 = gr.Button("🕺 Auto-prompt motion con M3 (del video)", size="sm")
                         v2v_provider = gr.Dropdown(
                             [("DeepSeek", "deepseek"), ("OpenAI", "openai"),
-                             ("Anthropic", "anthropic"), ("Gemini", "gemini"), ("MiniMax M3 (plan tokens)", "minimax")],
+                             ("Anthropic", "anthropic"), ("Gemini", "gemini"),
+                             ("MiniMax M3 (plan tokens)", "minimax")],
                             value="deepseek", label="Proveedor", scale=2)
                     v2v_negative = gr.Textbox(label="Prompt negativo", lines=1,
                                               value="worst quality, blurry, distorted")
@@ -479,8 +493,10 @@ with gr.Blocks(title="ControlVideoGen") as demo:
     v2v_btn.click(fn=do_v2v,
                   inputs=[v2v_video, v2v_mode, v2v_character, v2v_prompt, v2v_negative,
                           v2v_resolution, v2v_frames, v2v_steps, v2v_guidance, v2v_seed,
-                          v2v_start_ref],
+                          v2v_start_ref, v2v_duration],
                   outputs=[v2v_cond_preview, v2v_out, v2v_status])
+    v2v_m3.click(fn=do_describe_motion, inputs=v2v_video,
+                 outputs=[v2v_prompt, v2v_status])
 
     dir_save.click(fn=save_model_dir, inputs=dir_box, outputs=[header, table])
     profile_box.change(fn=save_profile, inputs=profile_box, outputs=header)

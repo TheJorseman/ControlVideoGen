@@ -52,11 +52,33 @@ I2V 480p/25f ≈ 10 min total.
 5. Los modelos 14B generan en segmentos de ~77 frames con condicion temporal del
    segmento previo; al final se re-ensambla y se mezcla el audio original.
 
-### Swap rapido con Nano Banana
+### Swap rapido con Nano Banana / GPT-Image / image-01
 
 En V2V, el panel "Swap rapido" toma un frame del video + una foto de la persona
-nueva y usa la API de imagenes de Gemini (`gemini-2.5-flash-image` / pro) para
-generar la imagen de referencia que alimenta a Wan Animate.
+nueva y genera la imagen de referencia con el motor elegido (Gemini
+`gemini-2.5-flash-image`, OpenAI `gpt-image-1` o MiniMax `image-01`), que luego
+alimenta a Wan Animate.
+
+### MiniMax en la nube (Token Plan)
+
+Modo **Video a Video → "MiniMax Hailuo-2.3 (nube, TOKEN PLAN)"**: la app replica el
+flujo del CLI de MiniMax, que si funciona con un plan de tokens (a diferencia de H3,
+que exige Creditos de cuenta):
+
+1. **Preflight de media** — `probe_media` detecta duracion/codec con ffmpeg; si el
+   video no cumple (VP9, o fuera de 2-15 s) `prepare_reference_media` transcode a
+   H.264 CRF20 + AAC igual que el CLI.
+2. **Auto-prompt de motion** — muestrea frames del video y se los pasa a **M3** (elegible
+   para el plan de tokens) que devuelve una descripcion de coreografia beat-by-beat,
+   neutra en genero.
+3. **Imagen-a-video first-frame** — sube la imagen como `first_frame_image` (el plan
+   cubre Hailuo-2.3) con el prompt I2VA; la app envuelve el texto en el formato
+   `"...at 0.00 seconds, <Picture 1> is fully referenced"`, hace polling y descarga.
+   Limites: 6 o 10 s @ 768P, sin audio nativo.
+
+Boton en V2V: **🕺 Auto-prompt motion con M3** (rellena el prompt desde el video).
+Nota: `MiniMax H3` (r2va, 15 s, audio sincronizado) sigue necesitando Creditos de
+cuenta (HTTP 402/2013) — el plan de tokens no lo cubre.
 
 ### Agente de prompts
 

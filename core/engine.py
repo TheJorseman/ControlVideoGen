@@ -343,6 +343,7 @@ _V2V_MODES = {
     "vace_pose": ("wan_vace", "VACE: video de esqueleto pose + prompt"),
     "vace_depth": ("wan_vace", "VACE: video de profundidad + prompt"),
     "minimax_r2va": ("minimax_api", "MiniMax H3 (nube, sin GPU): video de motion + foto de la persona"),
+    "minimax_i2v": ("minimax_i2v", "MiniMax Hailuo-2.3 (nube, TOKEN PLAN): imagen como primer frame + prompt de motion"),
 }
 
 
@@ -354,6 +355,74 @@ def _v2v_loader(model_key: str):
     from .backends import vace as vace_be, wan_animate as anim_be
 
     return anim_be.load_animate if model_key == anim_be.MODEL_KEY else vace_be.load_vace
+
+
+def _v2v_hailuo(settings: dict, prompt: str, character_image_path: str | None,
+                duration_s: int = 10) -> tuple[str, str]:
+    """Hailuo-2.3 (Token Plan): la imagen de referencia es el PRIMER FRAME y el
+    prompt describe el motion beat-by-beat. Max 10 s @768P, sin audio nativo."""
+    from .backends import minimax_api
+
+    if not character_image_path:
+        raise RuntimeError("Sube la imagen (sera el primer frame del video).")
+    if not prompt.strip():
+        raise RuntimeError("Escribe el prompt de motion (o usa el auto-prompt M3).")
+    api_key = settings["api_keys"].get("minimax", "")
+    host = settings.get("minimax_host", "")
+    duration = 6 if int(duration_s) <= 6 else 10
+    final_prompt = prompt if "is fully referenced" in prompt else \
+        minimax_api.build_i2va_prompt(prompt)
+
+    progress_reset(f"Hailuo-2.3 (nube): enviando imagen ({duration}s)...", steps=0)
+
+    def _poll(_):
+        s = time.time() - PROGRESS["t0"]
+        PROGRESS["stage"] = (f"Hailuo-2.3 (nube): generando "
+                             f"({int(s // 60)}m{int(s % 60):02d}s)")
+
+    url = minimax_api.hailuo_i2v(
+        api_key=api_key, prompt=final_prompt, first_frame_path=character_image_path,
+        duration=duration, resolution="768P", poll_cb=_poll, host=host,
+    )
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = OUTPUT_DIR / f"v2v_hailuo_{stamp}.mp4"
+    minimax_api.download_to(url, str(out))
+    PROGRESS.update({"stage": "Listo (nube, sin audio)", "done": True})
+    return str(out), ""
+
+
+def describe_motion(settings: dict, video_path: str, n_frames: int = 6) -> str:
+    """Auto-prompt: muestrea frames del video y M3 (Token Plan) los convierte en
+    una descripcion de coreografia beat-by-beat lista para el modo Hailuo."""
+    from . import preprocess
+    from .backends import minimax_api
+
+    import numpy as np
+
+    if not video_path:
+        raise RuntimeError("Sube primero el video de referencia.")
+    frames, _fps = preprocess.load_video(video_path, max_frames=150, size=(512, 896))
+    idx = np.linspace(0, len(frames) - 1, min(n_frames, len(frames))).astype(int)
+    tmp_dir = OUTPUT_DIR / "_m3_frames"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for j, i in enumerate(idx):
+        import PIL.Image
+
+        p = tmp_dir / f"f{j:02d}.png"
+        PIL.Image.fromarray(frames[i]).save(p)
+        paths.append(str(p))
+    PROGRESS.update({"stage": "M3 analizando los frames...", "done": False})
+    try:
+        text = minimax_api.describe_motion(
+            settings["api_keys"].get("minimax", ""), paths,
+            host=settings.get("minimax_host", ""),
+        )
+    finally:
+        PROGRESS.update({"stage": "Auto-prompt listo", "done": True})
+    if not text:
+        raise RuntimeError("M3 no devolvio descripcion")
+    return text
 
 
 def _v2v_minimax(settings: dict, video_path: str, prompt: str, max_frames: int,
@@ -528,7 +597,8 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
                  negative_prompt: str, resolution: str, max_frames: int,
                  steps: int, guidance: float, seed: int,
                  character_image_path: str | None = None,
-                 start_reference: bool = False) -> tuple[str, str]:
+                 start_reference: bool = False,
+                 duration_s: int = 10) -> tuple[str, str]:
     """Flujo completo Video-a-Video. Devuelve (mp4_final, preview_condiciones)."""
     from . import preprocess
     from .backends import vace as vace_be, wan_animate as anim_be
@@ -540,6 +610,8 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
     if model_key == "minimax_api":
         return _v2v_minimax(settings, video_path, prompt, max_frames,
                             character_image_path, start_reference)
+    if model_key == "minimax_i2v":
+        return _v2v_hailuo(settings, prompt, character_image_path, duration_s)
 
     conds = prepare_conditions(settings, video_path, mode, resolution, max_frames)
     n = len(conds["frames"])
