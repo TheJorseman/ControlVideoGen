@@ -147,13 +147,24 @@ def save_keys(hf_token, deepseek, openai, anthropic, gemini, minimax, minimax_ho
             "y como modo V2V en la nube (H3 ref2va). Host: " + SETTINGS["minimax_host"])
 
 
-def poll_progress(stage_md: gr.Textbox | None = None) -> str:
-    p = engine.PROGRESS
-    if p["done"]:
-        return f"Estado: {p['stage'] or 'idle'}"
-    if p["total_steps"]:
-        return f"**{p['stage']}** {p['step']}/{p['total_steps']} pasos"
-    return f"**{p['stage']}**"
+def poll_gen():
+    """Timer: devuelve (barra HTML, texto) segun engine.PROGRESS."""
+    s = engine.progress_state()
+    if s["done"]:
+        stage = s["stage"] or "listo"
+        return _bar_html(s.get("fraction", 1.0), f"✅ {stage}"), f"Estado: {stage}"
+    if s["pre_total"]:
+        frac = s["pre_step"] / max(s["pre_total"], 1)
+        txt = f"{s['stage']}: {s['pre_step']}/{s['pre_total']} frames ({frac * 100:.0f}%)"
+        return _bar_html(frac, txt), txt
+    if s["total_steps"]:
+        frac = s["fraction"]
+        txt = (f"{s['stage']} — segmento {s['segment']}/{s['total_segments']} · "
+               f"paso {s['step']}/{s['steps_per_seg']} · {frac * 100:.0f}% · "
+               f"{s['avg_step']:.0f}s/paso · ETA {int(s['eta'] // 60)}m{int(s['eta'] % 60):02d}s")
+        return _bar_html(frac, txt), txt
+    txt = s["stage"] or "..."
+    return _bar_html(0.0, txt), txt
 
 
 def resolve_seed(seed: int) -> int:
@@ -203,13 +214,14 @@ def do_extract(video_path, mode, resolution, frames):
 
 
 def do_v2v(video_path, mode, character, prompt, negative, resolution, frames,
-           steps, guidance, seed):
+           steps, guidance, seed, start_ref):
     if not video_path:
         return None, None, "Sube un video primero."
     try:
         out, preview = engine.generate_v2v(
             SETTINGS, mode, video_path, prompt, negative, resolution, int(frames),
             int(steps), float(guidance), resolve_seed(seed), character,
+            start_reference=bool(start_ref),
         )
         return preview, out, f"Video generado: {out}"
     except Exception as exc:  # noqa: BLE001
@@ -290,9 +302,10 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                     with gr.Row():
                         t2v_btn = gr.Button("Generar", variant="primary")
                         cancel_btn = gr.Button("Cancelar")
+                    t2v_bar = gr.HTML(_bar_html(0.0, "Sin generacion"))
                     t2v_status = gr.Markdown()
                     t2v_timer = gr.Timer(2.0, active=True)
-                    t2v_timer.tick(fn=poll_progress, outputs=t2v_status)
+                    t2v_timer.tick(fn=poll_gen, outputs=[t2v_bar, t2v_status])
                 with gr.Column(scale=2):
                     t2v_out = gr.Video(label="Resultado", format="mp4")
 
@@ -322,7 +335,10 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                         i2v_guidance = gr.Slider(1.0, 10.0, value=1.0, step=0.5, label="Guidance")
                         i2v_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = aleatorio)")
                     i2v_btn = gr.Button("Generar", variant="primary")
+                    i2v_bar = gr.HTML(_bar_html(0.0, "Sin generacion"))
                     i2v_status = gr.Markdown()
+                    i2v_timer = gr.Timer(2.0, active=True)
+                    i2v_timer.tick(fn=poll_gen, outputs=[i2v_bar, i2v_status])
                 with gr.Column(scale=2):
                     i2v_out = gr.Video(label="Resultado", format="mp4")
 
@@ -372,12 +388,16 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                         v2v_steps = gr.Slider(8, 50, value=20, step=1, label="Pasos por segmento")
                         v2v_guidance = gr.Slider(1.0, 10.0, value=1.0, step=0.5, label="Guidance")
                         v2v_seed = gr.Number(value=-1, precision=0, label="Seed (-1 = aleatorio)")
+                        v2v_start_ref = gr.Checkbox(
+                            label="Empezar con la imagen de referencia (crossfade 0.5s al inicio)",
+                            value=False)
                     with gr.Row():
                         v2v_extract_btn = gr.Button("Solo extraer condiciones (preview)")
                         v2v_btn = gr.Button("Generar V2V", variant="primary")
+                    v2v_bar = gr.HTML(_bar_html(0.0, "Sin generacion"))
                     v2v_status = gr.Markdown()
                     v2v_timer = gr.Timer(3.0, active=True)
-                    v2v_timer.tick(fn=poll_progress, outputs=v2v_status)
+                    v2v_timer.tick(fn=poll_gen, outputs=[v2v_bar, v2v_status])
                 with gr.Column(scale=2):
                     v2v_cond_preview = gr.Video(label="Video de condicion extraido")
                     v2v_out = gr.Video(label="Resultado", format="mp4")
@@ -457,7 +477,8 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                           outputs=[v2v_cond_preview, v2v_status])
     v2v_btn.click(fn=do_v2v,
                   inputs=[v2v_video, v2v_mode, v2v_character, v2v_prompt, v2v_negative,
-                          v2v_resolution, v2v_frames, v2v_steps, v2v_guidance, v2v_seed],
+                          v2v_resolution, v2v_frames, v2v_steps, v2v_guidance, v2v_seed,
+                          v2v_start_ref],
                   outputs=[v2v_cond_preview, v2v_out, v2v_status])
 
     dir_save.click(fn=save_model_dir, inputs=dir_box, outputs=[header, table])

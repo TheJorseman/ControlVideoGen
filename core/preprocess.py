@@ -160,13 +160,15 @@ def _detect_landmarks(landmarker, frame_np):
     return result.pose_landmarks[0] if result.pose_landmarks else None
 
 
-def extract_pose(frames_np, model_dir: str = "models", min_visibility: float = 0.4):
+def extract_pose(frames_np, model_dir: str = "models", min_visibility: float = 0.4,
+                   progress_cb=None):
     """Esqueletos estilo OpenPose sobre fondo negro via MediaPipe Tasks."""
     import cv2
 
     landmarker = _get_landmarker(model_dir)
     outs = []
-    for f in frames_np:
+    total = len(frames_np)
+    for i, f in enumerate(frames_np):
         h, w, _ = f.shape
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
         pts = _detect_landmarks(landmarker, f)
@@ -183,11 +185,14 @@ def extract_pose(frames_np, model_dir: str = "models", min_visibility: float = 0
                     cv2.circle(canvas, (int(pts[i].x * w), int(pts[i].y * h)),
                                max(2, h // 250), (255, 255, 255), -1)
         outs.append(_np_to_pil(canvas))
+        if progress_cb:
+            progress_cb(i + 1, total)
     return outs
 
 
 # ------------------------------------------------------------------ depth
-def extract_depth(frames_np, model_id: str = "depth-anything/Depth-Anything-V2-Small-hf"):
+def extract_depth(frames_np, model_id: str = "depth-anything/Depth-Anything-V2-Small-hf",
+                  progress_cb=None):
     if "depth_pipe" not in _CACHE or _CACHE.get("depth_id") != model_id:
         from transformers import pipeline
 
@@ -197,18 +202,27 @@ def extract_depth(frames_np, model_id: str = "depth-anything/Depth-Anything-V2-S
     import PIL.Image
 
     outs = []
-    for f in frames_np:
+    total = len(frames_np)
+    for i, f in enumerate(frames_np):
         result = pipe(PIL.Image.fromarray(f))
         pred = result["predicted_depth"]
         d = np.asarray(pred, dtype=np.float32)
         d = (d - d.min()) / (d.max() - d.min() + 1e-8) * 255
         outs.append(_np_to_pil(d.astype(np.uint8)))
+        if progress_cb:
+            progress_cb(i + 1, total)
     return outs
 
 
 # ------------------------------------------------------------------ mask
-def extract_person_masks(frames_np, invert: bool = False):
-    """Mascara de persona por frame via rembg. Blanco = generar, negro = conservar."""
+def extract_person_masks(frames_np, invert: bool = False, progress_cb=None):
+    """Mascara de persona por frame via rembg. Blanco = generar, negro = conservar.
+
+    only_mask=True devuelve un canal limpio (RGBA con only_alpha causaba mascaras
+    corruptas); se dilata para cubrir bordes/sombras de la persona original.
+    """
+    import cv2
+
     if "rembg" not in _CACHE:
         from rembg import new_session
 
@@ -216,26 +230,36 @@ def extract_person_masks(frames_np, invert: bool = False):
     from rembg import remove
 
     session = _CACHE["rembg"]
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     outs = []
-    for f in frames_np:
-        alpha = remove(f, only_alpha=True, session=session)
-        a = np.asarray(alpha)
-        mask = (a > 127).astype(np.uint8) * 255
+    total = len(frames_np)
+    for i, f in enumerate(frames_np):
+        import PIL.Image
+
+        mask = np.asarray(remove(PIL.Image.fromarray(f), only_mask=True,
+                                 post_process_mask=True, session=session))
+        if mask.ndim == 3:
+            mask = mask[:, :, 0]
+        binary = (mask > 127).astype(np.uint8) * 255
+        dilated = cv2.dilate(binary, kernel, iterations=2)
         if invert:
-            mask = 255 - mask
-        outs.append(_np_to_pil(mask))
+            dilated = 255 - dilated
+        outs.append(_np_to_pil(dilated))
+        if progress_cb:
+            progress_cb(i + 1, total)
     return outs
 
 
 # ------------------------------------------------------------------ face
 def extract_face_crops(frames_np, model_dir: str = "models", mask_frames=None,
-                       size: int = 512):
+                       size: int = 512, progress_cb=None):
     """Recorte de cara usando landmarks de MediaPipe (nariz/hombros) con fallback a
     bbox de la mascara o region superior central."""
     import cv2
 
     landmarker = _get_landmarker(model_dir)
     outs = []
+    total = len(frames_np)
     for i, f in enumerate(frames_np):
         h, w, _ = f.shape
         pts = _detect_landmarks(landmarker, f)
@@ -266,6 +290,8 @@ def extract_face_crops(frames_np, model_dir: str = "models", mask_frames=None,
         x1, y1 = max(x1, x0 + 8), max(y1, y0 + 8)
         crop = cv2.resize(f[y0:y1, x0:x1], (size, size))
         outs.append(_np_to_pil(crop))
+        if progress_cb:
+            progress_cb(i + 1, total)
     return outs
 
 

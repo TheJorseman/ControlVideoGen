@@ -24,8 +24,36 @@ RESOLUTIONS = {
 # {pipe, key} cache de un unico pipeline cargado
 _CACHE: dict = {}
 
-# progreso compartido para la UI
-PROGRESS: dict = {"stage": "", "step": 0, "total_steps": 0, "done": True}
+# progreso compartido para la UI y los logs
+PROGRESS: dict = {"stage": "", "step": 0, "total_steps": 0, "segment": 0,
+                  "total_segments": 1, "steps_per_seg": 0, "t0": 0.0,
+                  "done": True, "pre_step": 0, "pre_total": 0}
+
+
+def progress_reset(stage: str, steps: int = 0, segments: int = 1, sps: int = 0):
+    PROGRESS.update({"stage": stage, "step": 0, "total_steps": steps,
+                     "segment": 1, "total_segments": segments, "steps_per_seg": sps,
+                     "t0": time.time(), "done": False, "pre_step": 0, "pre_total": 0})
+
+
+def progress_state() -> dict:
+    p = dict(PROGRESS)
+    p.setdefault("avg_step", 0.0)
+    if not p["done"] and p["total_steps"]:
+        done_units = (p["segment"] - 1) * p["steps_per_seg"] + p["step"]
+        done_units = min(done_units, p["total_steps"])
+        elapsed = max(time.time() - p["t0"], 0.001)
+        avg = elapsed / max(done_units, 1)
+        p.update({"fraction": done_units / p["total_steps"],
+                  "done_units": done_units, "avg_step": avg,
+                  "eta": avg * (p["total_steps"] - done_units)})
+    elif p["done"]:
+        p["fraction"] = 1.0 if p["total_steps"] else 0.0
+        p["eta"] = 0
+        p["done_units"] = p["total_steps"]
+    else:
+        p.update({"fraction": 0.0, "eta": 0, "done_units": 0})
+    return p
 
 
 def detect_gpu() -> dict:
@@ -139,7 +167,15 @@ def interrupt() -> str:
 
 
 def _step_callback(_pipe, step: int, _t, cb_kwargs):
-    PROGRESS["step"] = step + 1
+    p = PROGRESS
+    if p["total_segments"] > 1 and step == 0 and p["step"] >= p["steps_per_seg"] - 1:
+        p["segment"] += 1
+    p["step"] = min(step + 1, p["steps_per_seg"] or step + 1)
+    s = progress_state()
+    print(f"[progreso] {p['stage']} · seg {p['segment']}/{p['total_segments']} "
+          f"paso {p['step']}/{p['steps_per_seg'] or '?'} · "
+          f"{s['fraction'] * 100:.0f}% · {s['avg_step']:.0f}s/paso · "
+          f"ETA {int(s['eta'] // 60)}m{int(s['eta'] % 60):02d}s", flush=True)
     return cb_kwargs
 
 
@@ -188,13 +224,14 @@ def generate(
     if backend == "minimax_api":
         from .backends import minimax_api
 
-        PROGRESS.update({"stage": "MiniMax H3 (API): enviando tarea...", "step": 0,
-                         "total_steps": 0, "done": False})
+        progress_reset("MiniMax H3 (API): enviando tarea...")
+
+        def _tick_poll():
+            s = time.time() - PROGRESS["t0"]
+            PROGRESS["stage"] = f"MiniMax H3 (API): generando en la nube ({int(s // 60)}m{int(s % 60):02d}s)"
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = OUTPUT_DIR / f"minimax_{kind}_{stamp}.mp4"
-
-        def poll_cb(_):
-            PROGRESS["stage"] = "MiniMax H3 (API): generando en la nube (10s por poll)..."
 
         url = minimax_api.generate(
             api_key=settings["api_keys"].get("minimax", ""),
@@ -205,7 +242,7 @@ def generate(
             duration=max(5, min(15, round(num_frames / 24))),
             resolution="768P",
             ratio=_ratio_from_size(width, height),
-            poll_cb=poll_cb,
+            poll_cb=_tick_poll,
             host=settings.get("minimax_host", ""),
         )
         minimax_api.download_to(url, str(out))
@@ -222,15 +259,14 @@ def generate(
         if last_image_path:
             last_image = Image.open(last_image_path).convert("RGB")
 
-    PROGRESS.update(
-        {"stage": "Cargando modelo (puede tardar la primera vez)...", "step": 0,
-         "total_steps": steps, "done": False}
-    )
     t0 = time.time()
+    progress_reset("Cargando modelo (puede tardar la primera vez)...",
+                   steps=int(steps), segments=1, sps=int(steps))
     if backend == "ltx_25":
         pipe = _ensure_pipe(settings, ltx_be.MODEL_KEY, ltx_be.load_ltx)
         pipe._interrupt = False
-        PROGRESS["stage"] = "Generando..."
+        PROGRESS.update({"stage": "Generando...", "t0": time.time(), "step": 0,
+                         "segment": 1})
         frames = ltx_be.run_ltx(
             pipe,
             prompt=prompt,
@@ -248,7 +284,8 @@ def generate(
         pipe = _ensure_pipe(settings, wan_be.MODEL_KEY, wan_be.load_i2v,
                             cache_key=f"{wan_be.MODEL_KEY}:i2v")
         pipe._interrupt = False
-        PROGRESS["stage"] = "Generando..."
+        PROGRESS.update({"stage": "Generando...", "t0": time.time(), "step": 0,
+                         "segment": 1})
         frames = wan_be.run_i2v(
             pipe,
             prompt=prompt,
@@ -267,7 +304,8 @@ def generate(
         pipe = _ensure_pipe(settings, wan_be.MODEL_KEY, wan_be.load_t2v,
                             cache_key=f"{wan_be.MODEL_KEY}:t2v")
         pipe._interrupt = False
-        PROGRESS["stage"] = "Generando..."
+        PROGRESS.update({"stage": "Generando...", "t0": time.time(), "step": 0,
+                         "segment": 1})
         frames = wan_be.run_t2v(
             pipe,
             prompt=prompt,
@@ -319,7 +357,8 @@ def _v2v_loader(model_key: str):
 
 
 def _v2v_minimax(settings: dict, video_path: str, prompt: str, max_frames: int,
-                 character_image_path: str | None) -> tuple[str, str]:
+                 character_image_path: str | None,
+                 start_reference: bool = False) -> tuple[str, str]:
     """Swap en la nube con H3 ref2va: motion del video + identidad de la foto."""
     from .backends import minimax_api
 
@@ -331,11 +370,12 @@ def _v2v_minimax(settings: dict, video_path: str, prompt: str, max_frames: int,
     host = settings.get("minimax_host", "")
     duration = max(4, min(15, round(int(max_frames) / 24)))
 
-    PROGRESS.update({"stage": f"MiniMax (nube): subiendo referencia ({duration}s)...",
-                     "step": 0, "total_steps": 0, "done": False})
+    progress_reset(f"MiniMax (nube): subiendo referencia ({duration}s)...", steps=0)
 
     def _poll(_):
-        PROGRESS["stage"] = "MiniMax (nube): generando en el servidor..."
+        s = time.time() - PROGRESS["t0"]
+        PROGRESS["stage"] = (f"MiniMax (nube): generando en el servidor "
+                             f"({int(s // 60)}m{int(s % 60):02d}s)")
 
     url = minimax_api.ref2va_generate(
         api_key=api_key, prompt=prompt,
@@ -345,6 +385,8 @@ def _v2v_minimax(settings: dict, video_path: str, prompt: str, max_frames: int,
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = OUTPUT_DIR / f"v2v_minimax_{stamp}.mp4"
     minimax_api.download_to(url, str(out))
+    if start_reference:
+        _start_frame_fade(str(out), character_image_path, fps=24)
     PROGRESS.update({"stage": "Listo (nube)", "done": True})
     return str(out), ""
 
@@ -359,12 +401,28 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
     """Extrae las condiciones del video y guarda un preview. Devuelve dict con todo."""
     from . import preprocess
 
+    kind = _V2V_MODES[mode][0]
+    heavy = kind in ("wan_animate", "wan_vace")
+
     if resolution == AUTO_RESOLUTION:
-        kind = _V2V_MODES[mode][0]
         sw, sh, _fps, _n = preprocess.probe_video(video_path)
-        resolution = _auto_size(sw, sh, settings, heavy=kind in ("wan_animate", "wan_vace"))
+        resolution = _auto_size(sw, sh, settings, heavy=heavy)
     height, width = _parse_size(resolution)
-    n = _snapped_frames(min(max_frames, resolve_profile(settings)["max_frames"]))
+    # los modelos 14B generan por segmentos -> hasta 257 frames; el resto, el techo del perfil
+    cap = 257 if heavy else resolve_profile(settings)["max_frames"]
+    n = _snapped_frames(min(max_frames, cap))
+
+    progress_reset("Extrayendo frames del video...", steps=0)
+
+    def _mk(stage):
+        def cb(i, total):
+            PROGRESS["stage"] = stage
+            PROGRESS["pre_step"] = i
+            PROGRESS["pre_total"] = total
+            if i == total or i % 10 == 0:
+                print(f"[progreso] {stage} {i}/{total}", flush=True)
+        return cb
+
     frames, fps = preprocess.load_video(video_path, max_frames=n, size=(width, height))
     if len(frames) < 17:
         raise RuntimeError("El video es demasiado corto (minimo 17 frames).")
@@ -376,21 +434,28 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
     conds["pil"] = pil
 
     stamp = datetime.now().strftime("%H%M%S")
-    kind = _V2V_MODES[mode][0]
     if mode in ("animate_replace", "animate"):
-        conds["pose"] = preprocess.extract_pose(frames, settings["model_dir"])
+        conds["pose"] = preprocess.extract_pose(
+            frames, settings["model_dir"], progress_cb=_mk("Pose (MediaPipe)")
+        )
         if mode == "animate_replace":
-            conds["mask"] = preprocess.extract_person_masks(frames)
+            conds["mask"] = preprocess.extract_person_masks(
+                frames, progress_cb=_mk("Mascara de persona (rembg)")
+            )
         conds["face"] = preprocess.extract_face_crops(
-            frames, settings["model_dir"], mask_frames=conds.get("mask")
+            frames, settings["model_dir"], mask_frames=conds.get("mask"),
+            progress_cb=_mk("Recortes de cara"),
         )
         preview = preprocess.save_video(
             preprocess.pil_to_frames(conds["pose"]),
             str(OUTPUT_DIR / f"preview_pose_{stamp}.mp4"), fps
         )
     else:
-        cond = (preprocess.extract_pose(frames, settings["model_dir"])
-                if mode == "vace_pose" else preprocess.extract_depth(frames))
+        if mode == "vace_pose":
+            cond = preprocess.extract_pose(frames, settings["model_dir"],
+                                           progress_cb=_mk("Pose (MediaPipe)"))
+        else:
+            cond = preprocess.extract_depth(frames, progress_cb=_mk("Depth (Depth Anything)"))
         conds["control"] = cond
         preview = preprocess.save_video(
             preprocess.pil_to_frames(cond),
@@ -400,10 +465,70 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
     return conds
 
 
+def _start_frame_fade(video_path: str, ref_image_path: str, fade_s: float = 0.5,
+                      fps: float | None = None) -> str:
+    """Reescribe el video para que arranque en la imagen de referencia con un
+    crossfade suave hacia el primer frame generado (empalma identidad y pose)."""
+    import os
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    cap = cv2.VideoCapture(video_path)
+    fps = fps or (cap.get(cv2.CAP_PROP_FPS) or 24.0)
+    frames = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        frames.append(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+    cap.release()
+    if not frames:
+        return video_path
+
+    h, w = frames[0].shape[:2]
+    im = Image.open(ref_image_path).convert("RGB")
+    src_ar, dst_ar = im.width / im.height, w / h
+    if src_ar > dst_ar:  # crop laterales
+        nw = int(im.height * dst_ar)
+        x = (im.width - nw) // 2
+        im = im.crop((x, 0, x + nw, im.height))
+    elif src_ar < dst_ar:  # crop vertical
+        nh = int(im.width / dst_ar)
+        y = (im.height - nh) // 2
+        im = im.crop((0, y, im.width, y + nh))
+    ref = np.asarray(im.resize((w, h), Image.LANCZOS))
+
+    k = max(2, int(round(fade_s * fps)))
+    k = min(k, max(len(frames) // 4, 2))
+    out_frames = []
+    for i, fr in enumerate(frames):
+        if i < k:
+            a = (i + 1) / (k + 1)
+            fr = (fr.astype(np.float32) * a + ref.astype(np.float32) * (1 - a)
+                  ).astype(np.uint8)
+        out_frames.append(fr)
+
+    tmp = video_path + ".src.mp4"
+    os.replace(video_path, tmp)
+    try:
+        from . import preprocess
+        preprocess.save_video(np.stack(out_frames), video_path, fps, audio_from=tmp)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return video_path
+
+
 def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
                  negative_prompt: str, resolution: str, max_frames: int,
                  steps: int, guidance: float, seed: int,
-                 character_image_path: str | None = None) -> tuple[str, str]:
+                 character_image_path: str | None = None,
+                 start_reference: bool = False) -> tuple[str, str]:
     """Flujo completo Video-a-Video. Devuelve (mp4_final, preview_condiciones)."""
     from . import preprocess
     from .backends import vace as vace_be, wan_animate as anim_be
@@ -414,14 +539,13 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
 
     if model_key == "minimax_api":
         return _v2v_minimax(settings, video_path, prompt, max_frames,
-                            character_image_path)
+                            character_image_path, start_reference)
 
-    PROGRESS.update({"stage": "Extrayendo condiciones (pose/depth/mask)...",
-                     "step": 0, "total_steps": 0, "done": False})
     conds = prepare_conditions(settings, video_path, mode, resolution, max_frames)
     n = len(conds["frames"])
     segments = max(1, -(-n // 77)) if model_key == "wan_animate" else 1
-    PROGRESS["total_steps"] = int(steps) * segments
+    progress_reset(f"Generando V2V ({mode})...", steps=int(steps) * segments,
+                   segments=segments, sps=int(steps))
 
     if _CACHE.get("model_key") != model_key or _CACHE.get("pipe") is None:
         _CACHE["pipe"] = None
@@ -435,12 +559,34 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
         if not character_image_path:
             raise RuntimeError("Sube la imagen de la persona/personaje nuevo.")
         character = Image.open(character_image_path).convert("RGB")
+        bg_frames = conds["pil"]
+        face_frames = conds["face"]
+        if start_reference:
+            # El frame 0 se fuerza como ancla del pipeline y el face_encoder es el
+            # que mas peso tiene en la identidad: usamos la imagen de referencia como
+            # frame 0 Y su cara como condicion facial, para no arrastrar la cara del
+            # video original (que dominaba y revertia la identidad).
+            im = character
+            src_ar, dst_ar = im.width / im.height, conds["width"] / conds["height"]
+            if src_ar > dst_ar:
+                nw = int(im.height * dst_ar)
+                x = (im.width - nw) // 2
+                im = im.crop((x, 0, x + nw, im.height))
+            elif src_ar < dst_ar:
+                nh = int(im.width / dst_ar)
+                y = (im.height - nh) // 2
+                im = im.crop((0, y, im.width, y + nh))
+            bg_frames = [im.resize((conds["width"], conds["height"]), Image.LANCZOS)] + list(bg_frames[1:])
+            import numpy as np
+
+            char_face = preprocess.extract_face_crops(np.asarray(character)[np.newaxis])
+            face_frames = [char_face[0]] * n
         frames_out = anim_be.run_animate(
             pipe,
             image=character,
             pose_frames=conds["pose"],
-            face_frames=conds["face"],
-            background_frames=conds["pil"] if mode == "animate_replace" else None,
+            face_frames=face_frames,
+            background_frames=bg_frames if mode == "animate_replace" else None,
             mask_frames=conds.get("mask") if mode == "animate_replace" else None,
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -479,5 +625,7 @@ def generate_v2v(settings: dict, mode: str, video_path: str, prompt: str,
     out = OUTPUT_DIR / f"v2v_{mode}_{stamp}.mp4"
     export_to_video(frames_out, str(out), fps=24)
     preprocess._mux_audio(str(out), video_path)
+    if start_reference and character_image_path:
+        _start_frame_fade(str(out), character_image_path, fps=24)
     PROGRESS.update({"stage": "Listo", "done": True})
     return str(out), conds["preview"]
