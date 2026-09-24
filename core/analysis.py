@@ -64,14 +64,18 @@ def _interp(times, curve, new_times):
 
 
 def find_audio_offset(generated_path: str, source_path: str,
-                      max_offset: float = 3.0, fps: float = 10.0) -> dict:
+                      max_offset: float = 3.0, fps: float = 10.0,
+                      min_confidence: float = 0.4) -> dict:
     """Offset (segundos) al que mover el audio para que el motion coincida.
 
     positivo => retrasar el audio; negativo => adelantarlo (recortar inicio).
-    Devuelve dict con offset_s, confidence (pico de correlacion normalizada)."""
+    Devuelve dict con offset_s, confidence (pico de correlacion normalizada).
+    Clips < 4 s o correlaciones < min_confidence no son fiables => offset 0."""
     gt, ge = _motion_curve(generated_path, sample_fps=fps)
     st, se = _motion_curve(source_path, sample_fps=fps)
     if len(ge) < 4 or len(se) < 4:
+        return {"offset_s": 0.0, "confidence": 0.0}
+    if gt[-1] < 4.0:  # clip demasiado corto: la correlacion es ruido
         return {"offset_s": 0.0, "confidence": 0.0}
 
     gen_len = gt[-1] + 1.0 / fps
@@ -89,6 +93,10 @@ def find_audio_offset(generated_path: str, source_path: str,
         corr = float((g * s).sum() / denom)
         if corr > best["confidence"]:
             best = {"offset_s": round(float(off), 2), "confidence": round(corr, 3)}
+    if best["confidence"] < min_confidence:
+        return {"offset_s": 0.0, "confidence": best["confidence"]}
+    if abs(best["offset_s"]) > gen_len * 0.5:  # un desplazamiento mayor que el
+        return {"offset_s": 0.0, "confidence": best["confidence"]}  # propio clip es absurdo
     return best
 
 

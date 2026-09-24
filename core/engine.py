@@ -396,7 +396,7 @@ def _v2v_hailuo(settings: dict, video_path: str, prompt: str,
 
 
 def sync_generated_audio(generated_path: str, source_path: str,
-                         settings: dict | None = None, threshold: float = 0.25):
+                         settings: dict | None = None, threshold: float = 0.4):
     """Herramienta: detecta el offset de motion entre el clip generado y el video
     fuente y re-muxea el audio compensado. Devuelve (ruta_final, nota)."""
     import os
@@ -540,7 +540,8 @@ def prepare_conditions(settings: dict, video_path: str, mode: str,
                 print(f"[progreso] {stage} {i}/{total}", flush=True)
         return cb
 
-    frames, fps = preprocess.load_video(video_path, max_frames=n, size=(width, height))
+    frames, fps = preprocess.load_video(video_path, max_frames=n, size=(width, height),
+                                        target_fps=24.0)
     if len(frames) < 17:
         raise RuntimeError("El video es demasiado corto (minimo 17 frames).")
     frames = frames[: _snapped_frames(len(frames))]

@@ -33,27 +33,45 @@ def _crop_resize(frame, size):
     return cv2.resize(frame, size)
 
 
-def load_video(path: str, max_frames: int | None = None, size: tuple | None = None):
-    """Devuelve (frames np uint8 [N,H,W,3], fps) usando OpenCV para leer."""
+def load_video(path: str, max_frames: int | None = None, size: tuple | None = None,
+               target_fps: float | None = None):
+    """Devuelve (frames np uint8 [N,H,W,3], fps).
+
+    Con target_fps (p.ej. 24) RE-MUESTREA en el tiempo: un video 60fps leido
+    frame a frame y reproducido a 24fps sale 2.5x ralentizado (desincroniza el
+    audio). El frame de salida k toma el frame fuente del tiempo k*fps/target.
+    """
     import cv2
 
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    resample = bool(target_fps and abs(fps - target_fps) > 0.5)
+    ratio = (fps / target_fps) if resample else 1.0
+    limit = max_frames or 10 ** 9
+
     frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if max_frames and len(frames) >= max_frames:
-            break
+    next_idx = 0
+    last = None
+    out_k = 0
+    while out_k < limit:
+        want = int(round(out_k * ratio))
+        while next_idx <= want:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            next_idx += 1
+            last = frame
+        if next_idx <= want or last is None:
+            break  # video agotado
+        frames.append(cv2.cvtColor(last, cv2.COLOR_BGR2RGB))
+        out_k += 1
     cap.release()
     if not frames:
         raise RuntimeError(f"No se pudo leer el video: {path}")
     out = np.stack(frames)
     if size:
         out = np.stack([_crop_resize(f, size) for f in out])
-    return out, float(fps)
+    return out, float(target_fps if resample else fps)
 
 
 def probe_video(path: str):
