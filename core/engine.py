@@ -363,7 +363,6 @@ def _v2v_hailuo(settings: dict, video_path: str, prompt: str,
     prompt describe el motion beat-by-beat. Max 10 s @768P. H2.3 es mudo: se le
     muxea el audio del video original recortado a la duracion generada."""
     from .backends import minimax_api
-    from . import preprocess
 
     if not character_image_path:
         raise RuntimeError("Sube la imagen (sera el primer frame del video).")
@@ -389,42 +388,83 @@ def _v2v_hailuo(settings: dict, video_path: str, prompt: str,
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = OUTPUT_DIR / f"v2v_hailuo_{stamp}.mp4"
     minimax_api.download_to(url, str(out))
-    PROGRESS["stage"] = "Muxeando audio del video original..."
-    try:
-        preprocess._mux_audio(str(out), video_path)
-        audio_note = ", audio original muxeado"
-    except Exception:  # noqa: BLE001
-        audio_note = " (sin audio: no se pudo muxear)"
-    PROGRESS.update({"stage": f"Listo (nube{audio_note})", "done": True})
-    return str(out), ""
+
+    PROGRESS["stage"] = "Alineando audio del original al motion generado..."
+    final, note = sync_generated_audio(str(out), video_path, settings)
+    PROGRESS.update({"stage": f"Listo (nube, {note})", "done": True})
+    return final, ""
 
 
-def describe_motion(settings: dict, video_path: str, n_frames: int = 6) -> str:
-    """Auto-prompt: muestrea frames del video y M3 (Token Plan) los convierte en
-    una descripcion de coreografia beat-by-beat lista para el modo Hailuo."""
+def sync_generated_audio(generated_path: str, source_path: str,
+                         settings: dict | None = None, threshold: float = 0.25):
+    """Herramienta: detecta el offset de motion entre el clip generado y el video
+    fuente y re-muxea el audio compensado. Devuelve (ruta_final, nota)."""
+    import os
+    from datetime import datetime
+
+    from . import analysis
     from . import preprocess
+
+    try:
+        r = analysis.find_audio_offset(generated_path, source_path)
+    except Exception:  # noqa: BLE001
+        r = {"offset_s": 0.0, "confidence": 0.0}
+    if r["confidence"] >= threshold and abs(r["offset_s"]) >= 0.1:
+        new = os.path.join(
+            str(OUTPUT_DIR),
+            f"synced_{datetime.now().strftime('%H%M%S')}{os.path.splitext(os.path.basename(generated_path))[0][-24:]}.mp4",
+        )
+        analysis.mux_audio_aligned(generated_path, source_path, r["offset_s"], new)
+        return new, (f"audio sincronizado {r['offset_s']:+.2f}s "
+                     f"(conf {r['confidence']:.2f})")
+    # fallback: mux simple sin offset
+    new = generated_path.replace(".mp4", "_mux.mp4")
+    try:
+        import shutil
+
+        shutil.copy(generated_path, new)
+        preprocess._mux_audio(new, source_path)
+        return new, f"audio mux sin offset (sync flojo: conf {r['confidence']:.2f})"
+    except Exception:  # noqa: BLE001
+        return generated_path, "sin audio"
+
+
+def describe_motion(settings: dict, video_path: str, n_frames: int = 8,
+                    target_duration: int = 10) -> str:
+    """Auto-prompt: muestrea N frames UNIFORMEMENTE a lo largo de todo el video y
+    M3 (Token Plan) devuelve una coreografia con timestamps beat-by-beat."""
     from .backends import minimax_api
 
+    import cv2
     import numpy as np
+    import PIL.Image
 
     if not video_path:
         raise RuntimeError("Sube primero el video de referencia.")
-    frames, _fps = preprocess.load_video(video_path, max_frames=150, size=(512, 896))
-    idx = np.linspace(0, len(frames) - 1, min(n_frames, len(frames))).astype(int)
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    idx = np.linspace(0, total - 1, n_frames).astype(int)
+    frames = []
+    for i in idx:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+        ok, fr = cap.read()
+        if ok:
+            frames.append((int(i), cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)))
+    cap.release()
+    if not frames:
+        raise RuntimeError("No se pudieron leer frames del video.")
+
     tmp_dir = OUTPUT_DIR / "_m3_frames"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for j, i in enumerate(idx):
-        import PIL.Image
+    for fidx, _fr in frames:
+        PIL.Image.fromarray(_fr).resize((512, 896)).save(tmp_dir / f"f{fidx}.png")
+    paths = [str(tmp_dir / f"f{i[0]}.png") for i in frames]
 
-        p = tmp_dir / f"f{j:02d}.png"
-        PIL.Image.fromarray(frames[i]).save(p)
-        paths.append(str(p))
     PROGRESS.update({"stage": "M3 analizando los frames...", "done": False})
     try:
         text = minimax_api.describe_motion(
             settings["api_keys"].get("minimax", ""), paths,
-            host=settings.get("minimax_host", ""),
+            host=settings.get("minimax_host", ""), duration_s=target_duration,
         )
     finally:
         PROGRESS.update({"stage": "Auto-prompt listo", "done": True})

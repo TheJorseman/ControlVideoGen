@@ -213,14 +213,24 @@ def do_extract(video_path, mode, resolution, frames):
         return None, f"Error: {exc}"
 
 
-def do_describe_motion(video_path):
+def do_describe_motion(video_path, duration):
     if not video_path:
         return None, "Sube primero el video de referencia."
     try:
-        text = engine.describe_motion(SETTINGS, video_path)
-        return text, f"Auto-prompt generado por M3 ({len(text.split())} palabras)."
+        text = engine.describe_motion(SETTINGS, video_path, target_duration=int(duration))
+        return text, f"Auto-prompt generado por M3 ({len(text.split())} palabras, con timestamps)."
     except Exception as exc:  # noqa: BLE001
         return None, f"Error M3: {exc}"
+
+
+def do_sync_audio(gen_video, src_video):
+    if not gen_video or not src_video:
+        return None, "Necesitas el video generado Y el video fuente (con el audio)."
+    try:
+        path, note = engine.sync_generated_audio(gen_video, src_video, SETTINGS)
+        return path, f" {note} → {path}"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Error: {exc}"
 
 
 def do_v2v(video_path, mode, character, prompt, negative, resolution, frames,
@@ -381,6 +391,16 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                                                      label="Modelo Gemini (ignorado con OpenAI)")
                         nano_btn = gr.Button("Generar imagen de referencia")
                         nano_msg = gr.Markdown()
+                    with gr.Accordion("🔊 Sync de audio post-generacion (opc. 4: recompensar offsets)", open=False):
+                        gr.Markdown("El audio de Hailuo/H2.3 no calza con la coreografia inventada: "
+                                    "carga aqui el clip generado y el video fuente y la app correlaciona "
+                                    "la energia de movimiento frame a frame para cortar/retrasar el audio.")
+                        with gr.Row():
+                            sync_gen = gr.Video(label="Video generado")
+                            sync_src = gr.Video(label="Video fuente (con el audio)")
+                        sync_btn = gr.Button("Sincronizar audio")
+                        sync_msg = gr.Markdown()
+                        sync_out = gr.Video(label="Resultado sincronizado")
                     v2v_prompt = gr.Textbox(label="Prompt", lines=3,
                                             placeholder="A woman in a red dress dancing... / describe the new look")
                     with gr.Row():
@@ -495,8 +515,10 @@ with gr.Blocks(title="ControlVideoGen") as demo:
                           v2v_resolution, v2v_frames, v2v_steps, v2v_guidance, v2v_seed,
                           v2v_start_ref, v2v_duration],
                   outputs=[v2v_cond_preview, v2v_out, v2v_status])
-    v2v_m3.click(fn=do_describe_motion, inputs=v2v_video,
+    v2v_m3.click(fn=do_describe_motion, inputs=[v2v_video, v2v_duration],
                  outputs=[v2v_prompt, v2v_status])
+    sync_btn.click(fn=do_sync_audio, inputs=[sync_gen, sync_src],
+                   outputs=[sync_out, sync_msg])
 
     dir_save.click(fn=save_model_dir, inputs=dir_box, outputs=[header, table])
     profile_box.change(fn=save_profile, inputs=profile_box, outputs=header)

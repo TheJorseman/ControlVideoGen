@@ -339,9 +339,13 @@ def hailuo_i2v(api_key: str, prompt: str, first_frame_path: str,
 
 # ------------------------------------------------------------ M3 auto-prompt
 def describe_motion(api_key: str, frame_paths: list[str], host: str = "",
-                    model: str = "MiniMax-M3") -> str:
+                    model: str = "MiniMax-M3", duration_s: float = 10.0,
+                    with_timestamps: bool = True) -> str:
     """M3 (Token Plan) entiende imagenes: convierte frames del video de
-    referencia en un prompt de coreografia beat-by-beat para I2VA."""
+    referencia en un prompt de coreografia beat-by-beat para I2VA.
+
+    with_timestamps agrega marcas de tiempo para que Hailuo-2.3 respete los
+    tiempos de los movimientos (mejora el sync, aunque no es exacto)."""
     import base64
     from pathlib import Path
 
@@ -350,15 +354,21 @@ def describe_motion(api_key: str, frame_paths: list[str], host: str = "",
     host = _base(host)
     if not api_key:
         raise RuntimeError("Falta la API key de MiniMax (Ajustes).")
+    ts_rule = (
+        f"The clip is {int(duration_s)} seconds. Attach an approximate timestamp "
+        f"(e.g. 'At 0.0s', 'At 2.5s', 'At 7s') to each movement, evenly spaced "
+        f"across {int(duration_s)}s. " if with_timestamps else ""
+    )
     blocks = [{
         "type": "text",
         "text": (
-            "These are sequential frames from a dance video. Write an English "
-            "prompt for an AI video generator describing the person's motion "
-            "beat by beat, temporally ordered, 60-90 words, starting from "
-            "'The person from the image ...'. NEVER use gendered pronouns "
-            "(he/she/her/him) or describe appearance — only motion and pose. "
-            "Mention camera as static. Output only the prompt."
+            "These are sequential frames sampled evenly across a dance video. "
+            "Write an English prompt for an AI video generator describing the "
+            "person's motion beat by beat, temporally ordered, 80-120 words, "
+            "starting from 'The person from the image ...'. " + ts_rule +
+            "NEVER use gendered pronouns (he/she/her/him) or describe "
+            "appearance - only motion and pose. Mention camera as static. "
+            "Output only the prompt."
         ),
     }]
     for fp in frame_paths:
